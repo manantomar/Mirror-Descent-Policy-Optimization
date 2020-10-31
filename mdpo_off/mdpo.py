@@ -44,14 +44,12 @@ class MDPO(OffPolicyRLModel):
     :param buffer_size: (int) size of the replay buffer
     :param batch_size: (int) Minibatch size for each gradient update
     :param tau: (float) the soft update coefficient ("polyak update", between 0 and 1)
-    :param ent_coef: (str or float) Entropy regularization coefficient. (Equivalent to
+    :param lamda: (str or float) Entropy regularization coefficient. (Equivalent to
         inverse of reward scale in the original SAC paper.)  Controlling exploration/exploitation trade-off.
-        Set it to 'auto' to learn it automatically (and 'auto_0.1' for using 0.1 as initial value)
     :param train_freq: (int) Update the model every `train_freq` steps.
     :param learning_starts: (int) how many steps of the model to collect transitions for before learning starts
     :param target_update_interval: (int) update the target network every `target_network_update_freq` steps.
     :param gradient_steps: (int) How many gradient update after each step
-    :param target_entropy: (str or float) target entropy when learning ent_coef (ent_coef = 'auto')
     :param action_noise: (ActionNoise) the action noise type (None by default), this can help
         for hard exploration problem. Cf DDPG for the different action noise type.
     :param random_exploration: (float) Probability of taking a random action (as in an epsilon-greedy strategy)
@@ -67,8 +65,8 @@ class MDPO(OffPolicyRLModel):
 
     def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, buffer_size=50000,
                  learning_starts=100, train_freq=1, batch_size=256,
-                 tau=0.005, ent_coef=1.0, lamda=0, target_update_interval=1,
-                 gradient_steps=1, target_entropy='auto', action_noise=None,
+                 tau=0.005, lamda=0, target_update_interval=1,
+                 gradient_steps=1, action_noise=None,
                  random_exploration=0.0, verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False, 
                  seed=0, tsallis_q=1, reparameterize=True, klconst=1.0):
@@ -88,7 +86,6 @@ class MDPO(OffPolicyRLModel):
         # self.vf_lr = learning_rate
         # Entropy coefficient / Entropy temperature
         # Inverse of the reward scale
-        self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
         self.gradient_steps = gradient_steps
         self.gamma = gamma
@@ -105,7 +102,6 @@ class MDPO(OffPolicyRLModel):
         self.params = None
         self.summary = None
         self.policy_tf = None
-        self.target_entropy = target_entropy
         self.full_tensorboard_log = full_tensorboard_log
 
         self.obs_target = None
@@ -125,7 +121,6 @@ class MDPO(OffPolicyRLModel):
         self.learning_rate_ph = None
         self.processed_obs_ph = None
         self.processed_next_obs_ph = None
-        self.log_ent_coef = None
         self.seed = seed
         self.lamda = lamda
         self.tsallis_q = tsallis_q
@@ -179,7 +174,7 @@ class MDPO(OffPolicyRLModel):
                     self.actions_ph = tf.placeholder(tf.float32, shape=(None,) + self.action_space.shape,
                                                      name='actions')
                     self.learning_rate_ph = tf.placeholder(tf.float32, [], name="learning_rate_ph")
-                    self.ent_coef_ph = tf.placeholder(tf.float32, [], name="ent_coef_ph")
+                    self.kl_coef_ph = tf.placeholder(tf.float32, [], name="kl_coef_ph")
 
                 with tf.variable_scope("model", reuse=False):
                     # Create the policy
@@ -197,37 +192,6 @@ class MDPO(OffPolicyRLModel):
                     qf1_pi, qf2_pi, _ = self.policy_tf.make_critics(self.processed_obs_ph,
                                                                     policy_out, create_qf=True, create_vf=False,
                                                                     reuse=True)
-                    #qf1_pi, qf2_pi, _ = self.policy_tf.make_critics(self.processed_obs_ph,
-                    #                                                old_policy_out, create_qf=True, create_vf=False,
-                    #                                                reuse=True)
-
-                    # Target entropy is used when learning the entropy coefficient
-                    if self.target_entropy == 'auto':
-                        # automatically set target entropy if needed
-                        self.target_entropy = -np.prod(self.env.action_space.shape).astype(np.float32)
-                    else:
-                        # Force conversion
-                        # this will also throw an error for unexpected string
-                        self.target_entropy = float(self.target_entropy)
-
-                    # The entropy coefficient or entropy can be learned automatically
-                    # see Automating Entropy Adjustment for Maximum Entropy RL section
-                    # of https://arxiv.org/abs/1812.05905
-                    if isinstance(self.ent_coef, str) and self.ent_coef.startswith('auto'):
-                        # Default initial value of ent_coef when learned
-                        init_value = 1.0
-                        if '_' in self.ent_coef:
-                            init_value = float(self.ent_coef.split('_')[1])
-                            assert init_value > 0., "The initial value of ent_coef must be greater than 0"
-
-                        self.log_ent_coef = tf.get_variable('log_ent_coef', dtype=tf.float32,
-                                                            initializer=np.log(init_value).astype(np.float32))
-                        self.ent_coef = tf.exp(self.log_ent_coef)
-                    else:
-                        # Force conversion to float
-                        # this will throw an error if a malformed string (different from 'auto')
-                        # is passed
-                        self.ent_coef = self.ent_coef_ph #float(self.ent_coef)
 
                 with tf.variable_scope("target", reuse=False):
                     # Create the value network
@@ -257,21 +221,12 @@ class MDPO(OffPolicyRLModel):
                     qf1_loss = 0.5 * tf.reduce_mean((q_backup - qf1) ** 2)
                     qf2_loss = 0.5 * tf.reduce_mean((q_backup - qf2) ** 2)
 
-                    # Compute the entropy temperature loss
-                    # it is used when the entropy coefficient is learned
-                    ent_coef_loss, entropy_optimizer = None, None
-                    #if not isinstance(self.ent_coef, float):
-                    #    ent_coef_loss = -tf.reduce_mean(
-                    #        self.log_ent_coef * tf.stop_gradient(logp_pi + self.target_entropy))
-                    #    entropy_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
-
                     # Compute the policy loss
                     # Alternative: policy_kl_loss = tf.reduce_mean(logp_pi - min_qf_pi)
                     if self.reparameterize:
-                        policy_kl_loss = tf.reduce_mean(logp_pi * self.ent_coef + self.tsallis_q * (self.lamda - self.ent_coef) * logp_pi_old - qf1_pi)
-                        #policy_kl_loss = tf.reduce_mean(logp_pi * self.ent_coef + (self.lamda - self.ent_coef * self.tsallis_q) * logp_pi_old - qf1_pi_old)
+                        policy_kl_loss = tf.reduce_mean(logp_pi * self.kl_coef_ph + self.tsallis_q * (self.lamda - self.kl_coef_ph) * logp_pi_old - qf1_pi)
                     else:
-                        target_policy = tf.clip_by_value(tf.exp((-logp_old * self.lamda + qf1_pi - value_fn) / (self.ent_coef + self.lamda)), 0, 0.9)
+                        target_policy = tf.clip_by_value(tf.exp((-logp_old * self.lamda + qf1_pi - value_fn) / (self.kl_coef_ph + self.lamda)), 0, 0.9)
                         policy_kl_loss = tf.reduce_mean(target_policy * (target_policy - logp_pi_old_action))
                         
                     mean_reg_loss = 1e-3 * tf.reduce_mean(self.policy_tf.act_mu ** 2)
@@ -340,23 +295,12 @@ class MDPO(OffPolicyRLModel):
                                          value_loss, qf1, qf2, value_fn, logp_pi,
                                          self.entropy, logp_pi_old, train_values_op, policy_train_op]
 
-                        # Add entropy coefficient optimization operation if needed
-                        if ent_coef_loss is not None:
-                            with tf.control_dependencies([train_values_op]):
-                                ent_coef_op = entropy_optimizer.minimize(ent_coef_loss, var_list=self.log_ent_coef)
-                                self.infos_names += ['ent_coef_loss', 'ent_coef']
-                                self.step_ops += [ent_coef_op, ent_coef_loss, self.ent_coef]
-
                     # Monitor losses and entropy in tensorboard
                     tf.summary.scalar('policy_loss', policy_loss)
                     tf.summary.scalar('qf1_loss', qf1_loss)
                     tf.summary.scalar('qf2_loss', qf2_loss)
                     tf.summary.scalar('value_loss', value_loss)
                     tf.summary.scalar('entropy', self.entropy)
-                    if ent_coef_loss is not None:
-                        tf.summary.scalar('ent_coef_loss', ent_coef_loss)
-                        tf.summary.scalar('ent_coef', self.ent_coef)
-
                     tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
 
                 # Retrieve parameters that must be saved
@@ -370,9 +314,8 @@ class MDPO(OffPolicyRLModel):
 
                 self.summary = tf.summary.merge_all()
 
-    def _train_step(self, step, learning_rate, ent_coef):
+    def _train_step(self, step, learning_rate, kl_coef):
         
-        #for grad_step in range(self.gradient_steps):
         # Sample a batch from the replay buffer
         batch = self.replay_buffer.sample(self.batch_size)
         batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_dones, batch_terminals = batch
@@ -384,12 +327,8 @@ class MDPO(OffPolicyRLModel):
             self.rewards_ph: batch_rewards.reshape(self.batch_size, -1),
             self.terminals_ph: batch_terminals.reshape(self.batch_size, -1),
             self.learning_rate_ph: learning_rate,
-            self.ent_coef_ph: ent_coef
+            self.kl_coef_ph: kl_coef
         }
-
-        # out  = [policy_loss, qf1_loss, qf2_loss,
-        #         value_loss, qf1, qf2, value_fn, logp_pi,
-        #         self.entropy, policy_train_op, train_values_op]
 
         # Do one gradient step
         out = self.sess.run(self.step_ops, feed_dict)
@@ -398,10 +337,6 @@ class MDPO(OffPolicyRLModel):
         policy_loss, qf1_loss, qf2_loss, value_loss, *values = out
         # qf1, qf2, value_fn, logp_pi, entropy, *_ = values
         entropy = values[4]
-        
-        if self.log_ent_coef is not None:
-            ent_coef_loss, ent_coef = values[-2:]
-            return policy_loss, qf1_loss, qf2_loss, value_loss, entropy, ent_coef_loss, ent_coef
 
         return policy_loss, qf1_loss, qf2_loss, value_loss, entropy
 
@@ -414,8 +349,6 @@ class MDPO(OffPolicyRLModel):
             self.replay_buffer = replay_wrapper(self.replay_buffer)
 
         with SetVerbosity(self.verbose):
-
-            #self._setup_learn(seed)
 
             # Transform to callable if needed
             self.learning_rate = get_schedule_fn(self.learning_rate)
@@ -486,7 +419,7 @@ class MDPO(OffPolicyRLModel):
                             break
                         n_updates += 1
                         # Compute current learning_rate
-                        t_k = self.klconst #np.sqrt(step / total_timesteps) step / total_timesteps
+                        t_k = self.klconst # step / total_timesteps
                         frac = 1.0 - step / total_timesteps
                         current_lr = self.learning_rate(frac)
                         # Update policy and critics (q functions)
@@ -522,7 +455,7 @@ class MDPO(OffPolicyRLModel):
                 num_episodes = len(episode_rewards)
                 self.num_timesteps += 1
                 # Display training infos
-                if self.verbose >= 1 and step % log_interval == 0: #done and log_interval is not None and len(episode_rewards) % log_interval == 0:
+                if self.verbose >= 1 and step % log_interval == 0:
                     fps = int(step / (time.time() - start_time))
                     logger.logkv("episodes", num_episodes)
                     logger.logkv("mean 100 episode reward", mean_reward)
@@ -531,7 +464,7 @@ class MDPO(OffPolicyRLModel):
                         logger.logkv('eplenmean', safe_mean([ep_info['l'] for ep_info in ep_info_buf]))
                     logger.logkv("n_updates", n_updates)
                     logger.logkv("current_lr", current_lr)
-                    logger.logkv("ent_coef", 1-frac)
+                    logger.logkv("lamda", self.lamda)
                     logger.logkv("fps", fps)
                     logger.logkv('time_elapsed', int(time.time() - start_time))
                     if len(episode_successes) > 0:
@@ -540,7 +473,6 @@ class MDPO(OffPolicyRLModel):
                         for (name, val) in zip(self.infos_names, infos_values):
                             logger.logkv(name, val)
                     logger.logkv("total timesteps", self.num_timesteps)
-                    logger.logkv("frac", frac)
                     logger.logkv("t_k", t_k)
                     logger.logkv("steps", step)
                     logger.dumpkvs()
@@ -583,8 +515,7 @@ class MDPO(OffPolicyRLModel):
             "train_freq": self.train_freq,
             "batch_size": self.batch_size,
             "tau": self.tau,
-            "ent_coef": self.ent_coef if isinstance(self.ent_coef, float) else 'auto',
-            "target_entropy": self.target_entropy,
+            "kl_coef": self.kl_coef_ph,
             # Should we also store the replay buffer?
             # this may lead to high memory usage
             # with all transition inside

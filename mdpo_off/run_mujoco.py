@@ -50,7 +50,7 @@ def train(env_id, num_timesteps, seed, lam, sgd_steps, klcoeff, log, tsallis_coe
         #env = VecNormalize(env)
         model = MDPO(MlpPolicy, env, gamma=0.99, verbose=1, seed=seed, buffer_size=1000000, gradient_steps=sgd_steps, \
             lamda=lam, train_freq=1, tsallis_q=tsallis_coeff, reparameterize=True, klconst=klcoeff, learning_starts=10000)
-        model.learn(total_timesteps=int(num_timesteps))#num_timesteps, seed=seed)
+        model.learn(total_timesteps=int(num_timesteps))
         env.close()
 
 

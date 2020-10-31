@@ -20,7 +20,7 @@ from stable_baselines.sac_trpo.tf_tsallis_statistics import *
 
 class MDPO(ActorCriticRLModel):
     """
-    Trust Region Policy Optimization (https://arxiv.org/abs/1502.05477)
+    Mirror Descent Policy Optimization (On-policy)
 
     :param policy: (ActorCriticPolicy or str) The policy model to use (MlpPolicy, CnnPolicy, CnnLstmPolicy, ...)
     :param env: (Gym environment or str) The environment to learn from (if registered in Gym, can be str)
@@ -185,7 +185,6 @@ class MDPO(ActorCriticRLModel):
 
                     vf_losses1 = tf.square(self.policy_pi.value_flat - self.ret)
                     vf_losses2 = tf.square(vpred_clipped - self.ret)
-                    #vferr = tf.reduce_mean(vf_losses1) #tf.maximum(vf_losses1, vf_losses2))
                     vferr = tf.reduce_mean(tf.maximum(vf_losses1, vf_losses2))
 
                     # advantage * pnew / pold
@@ -252,13 +251,6 @@ class MDPO(ActorCriticRLModel):
                     #trainer = tf.train.AdamOptimizer(learning_rate=3e-4, epsilon=1e-5)
                     grads = list(zip(grads, var_list))
                     self._train = trainer.apply_gradients(grads)
-
-                    #if self.method == "closed-KL":
-                    #    grads = tf.gradients(-policygain, closed_var_list)
-                    #    grads, _grad_norm = tf.clip_by_global_norm(grads, 0.5)
-                    #    trainer_policy = tf.train.AdamOptimizer(learning_rate=self.outer_learning_rate_ph, epsilon=1e-5)
-                    #    grads = list(zip(grads, closed_var_list))
-                    #    self._train_policy = trainer_policy.apply_gradients(grads)
 
                     @contextmanager
                     def timed(msg):
@@ -332,7 +324,6 @@ class MDPO(ActorCriticRLModel):
 
         with SetVerbosity(self.verbose), TensorboardWriter(self.graph, self.tensorboard_log, tb_log_name, new_tb_log) \
                 as writer:
-            #self._setup_learn(seed)
 
             with self.sess.as_default():
                 seg_gen = traj_segment_generator(self.old_policy, self.env, self.timesteps_per_batch,
@@ -406,10 +397,7 @@ class MDPO(ActorCriticRLModel):
                                                                               writer, self.num_timesteps)
 
                         n_updates = int(total_timesteps / self.timesteps_per_batch)
-                        #lr_now = iters_so_far / n_updates
-                        lr_now = 1.0 - (iters_so_far - 1.0) / n_updates #(iters_so_far) / n_updates #+ 0.05
-                        #if lr_now > 1.0:
-                        #    lr_now = 1.0
+                        lr_now = 1.0 - (iters_so_far - 1.0) / n_updates
                         outer_lr_now = self.outer_learning_rate(1.0 - (iters_so_far - 1.0) / n_updates)
                         clip_now = self.cliprange_vf(1.0 - (iters_so_far - 1.0) / n_updates)
                         args = seg["observations"], seg["observations"], seg["actions"], atarg
@@ -458,7 +446,7 @@ class MDPO(ActorCriticRLModel):
                                     grad = self.allmean(self.compute_vflossandgrad(mbob, mbob, mbret, mbval, clip_now, sess=self.sess))
                                     self.vfadam.update(grad, outer_lr_now) #self.vf_stepsize)
 
-                        if iters_so_far % 1 == 0: #self.sgd_steps == 0:
+                        if iters_so_far % 1 == 0:
                             print("updating theta now")
                             self.assign_old_eq_new(sess=self.sess)
 
