@@ -132,10 +132,10 @@ class MDPO(OffPolicyRLModel):
         self.reparameterize = reparameterize
         self.klconst = klconst
 
-        if self.tsallis_q == 1.0:
-            self.log_type = "log"
-        else:
-            self.log_type = "q-log"
+        #if self.tsallis_q == 1.0:
+        #    self.log_type = "log"
+        #else:
+        self.log_type = "q-log"
 
         if _init_setup_model:
             self.setup_model()
@@ -268,7 +268,7 @@ class MDPO(OffPolicyRLModel):
                     # Compute the policy loss
                     # Alternative: policy_kl_loss = tf.reduce_mean(logp_pi - min_qf_pi)
                     if self.reparameterize:
-                        policy_kl_loss = tf.reduce_mean(logp_pi * self.ent_coef + (self.lamda - self.ent_coef * self.tsallis_q) * logp_pi_old - qf1_pi)
+                        policy_kl_loss = tf.reduce_mean(logp_pi * self.ent_coef + self.tsallis_q * (self.lamda - self.ent_coef) * logp_pi_old - qf1_pi)
                         #policy_kl_loss = tf.reduce_mean(logp_pi * self.ent_coef + (self.lamda - self.ent_coef * self.tsallis_q) * logp_pi_old - qf1_pi_old)
                     else:
                         target_policy = tf.clip_by_value(tf.exp((-logp_old * self.lamda + qf1_pi - value_fn) / (self.ent_coef + self.lamda)), 0, 0.9)

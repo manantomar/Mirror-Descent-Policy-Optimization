@@ -62,7 +62,7 @@ def tf_log_q(x,q):
     safe_x = tf.maximum(x,1e-6)
 
     log_q_x = tf.cond(tf.equal(q,1.),true_fn=lambda: tf.log(safe_x),false_fn=lambda: (tf.pow(safe_x,1-q)-1)/(1-q))
-    return 0.5 * log_q_x
+    return log_q_x
 
 def tf_tsallis_entropy(p,q):
     return tf.reduce_sum(-tf_log_q(p,q)*p,axis=1,keepdims=True)
